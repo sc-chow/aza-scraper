@@ -1,128 +1,107 @@
-"""
-Scraper for the AZA "Find a Zoo or Aquarium" accredited facilities list.
-https://www.aza.org/find-a-zoo-or-aquarium?locale=en
-
-The page is static server-rendered HTML (no JS needed), so requests +
-BeautifulSoup is sufficient.
-
-Each entry on the page follows this pattern:
-    **[Name](url), Location**
-    Accredited through <Month> <Year>
-    (optional: *(also accredited by the American Alliance of Museums)*)
-
-There are two sections: "Currently Accredited Zoos and Aquariums" and
-"Current Accredited Related Facilities". This script captures both and
-tags each row with which section it came from.
-
-Output: aza_accredited_facilities.csv
-"""
-
 import csv
 import re
-import time
-import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 URL = "https://www.aza.org/find-a-zoo-or-aquarium?locale=en"
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Referer": "https://www.google.com/",
-}
 
 
 def fetch_page(url: str) -> str:
-    # A plain session (rather than a one-off request) plus a first hit to
-    # the homepage helps pick up any cookies the site sets before it will
-    # serve the actual listing page.
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    session.get("https://www.aza.org/", timeout=30)
-    time.sleep(1)
-    resp = session.get(url, timeout=30)
-    resp.raise_for_status()
-    return resp.text
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
+        page.goto(url, wait_until="networkidle", timeout=60000)
+        # Scroll to ensure dynamically loaded list elements are in DOM
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(3000)
+        html = page.content()
+        browser.close()
+        return html
 
 
 def parse_facilities(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
-
-    # Get the main content area text, preserving line breaks between
-    # block-level elements so our regex can work line-by-line.
-    for tag in soup(["script", "style", "nav", "footer", "header"]):
-        tag.decompose()
-
-    main = soup.get_text(separator="\n")
-    lines = [l.strip() for l in main.split("\n") if l.strip()]
-
-    # Also build a lookup of link text -> href from the raw soup,
-    # since get_text() strips URLs.
-    link_map = {}
-    for a in soup.find_all("a", href=True):
-        text = a.get_text(strip=True)
-        if text:
-            link_map[text] = a["href"]
-
     facilities = []
-    section = "Accredited Zoo/Aquarium"
-    name_line_re = re.compile(r"^(.*?),\s*([A-Za-z .'\-]+)$")
-    accredited_re = re.compile(r"^Accredited [Tt]hrough\s+(.+)$")
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    content_area = soup.find("main") or soup.find("body") or soup
+    current_section = "Accredited Zoo/Aquarium"
 
-        if "Current Accredited Related Facilities" in line:
-            section = "Related Facility"
-            i += 1
+    # Iterate over headers, paragraphs, list items, and containers directly
+    elements = content_area.find_all(["h2", "h3", "h4", "p", "li", "div"])
+
+    for element in elements:
+        # Avoid processing large parent containers that enclose full sections
+        if len(element.find_all(["p", "li"])) > 1 and element.name not in ["p", "li"]:
             continue
 
-        # Stop once we hit the "Donate Now" footer content
-        if line.startswith("Donate Now"):
-            break
+        raw_text = element.get_text(" ", strip=True)
 
-        m = accredited_re.match(line)
-        if m and facilities:
-            facilities[-1]["accredited_through"] = m.group(1).strip()
-            i += 1
+        # Update section headers dynamically
+        if re.search(r"Certified Related Facility|Related Facilities", raw_text, re.IGNORECASE):
+            current_section = "Related Facility"
+            continue
+        elif re.search(r"Accredited Zoos|Accredited Aquariums|AZA-Accredited", raw_text, re.IGNORECASE):
+            if "through" not in raw_text.lower():  # Exclude individual facility lines
+                current_section = "Accredited Zoo/Aquarium"
+                continue
+
+        # Skip entries without accreditation details
+        if not re.search(r"Accredited through|Certified through", raw_text, re.IGNORECASE):
             continue
 
-        if "(also accredited by the American Alliance of Museums)" in line and facilities:
-            facilities[-1]["also_aam_accredited"] = True
-            i += 1
+        a_tag = element.find("a", href=True)
+        if not a_tag:
             continue
 
-        nm = name_line_re.match(line)
-        if nm:
-            name, location = nm.group(1).strip(), nm.group(2).strip()
-            # Skip obvious false positives (nav links, etc.) shorter checks
-            if len(name) > 2 and len(location) < 40:
-                url = link_map.get(name, "")
-                facilities.append(
-                    {
-                        "name": name,
-                        "location": location,
-                        "website": url,
-                        "accredited_through": "",
-                        "also_aam_accredited": False,
-                        "section": section,
-                    }
-                )
-        i += 1
+        name = a_tag.get_text(strip=True)
+        if not name or len(name) <= 2:
+            continue
+
+        # Extract Expiration Date
+        acc_match = re.search(
+            r"(?:Accredited|Certified)\s+through\s+([A-Za-z]+\s+\d{4})",
+            raw_text,
+            re.IGNORECASE,
+        )
+        accredited_through = acc_match.group(1).strip() if acc_match else ""
+
+        # Extract Location
+        location = ""
+        # Match text between name and accreditation note
+        loc_match = re.search(
+            r"^\s*" + re.escape(name) + r"\s*[\,\–\-]?\s*(.*?)\s*(?:\(?(?:Accredited|Certified)\s+through|\(also accredited|$)",
+            raw_text,
+            re.IGNORECASE,
+        )
+        if loc_match:
+            location = loc_match.group(1).strip().strip(",-– ")
+
+        # Fallback location extraction if initial regex fails
+        if not location and a_tag.next_sibling:
+            sibling_text = str(a_tag.next_sibling).strip()
+            sibling_text = re.sub(r"^\s*,\s*", "", sibling_text)
+            location = re.split(r"Accredited|Certified|\(", sibling_text, flags=re.IGNORECASE)[0].strip().rstrip(",")
+
+        # Extract AAM Accreditation Flag
+        also_aam = bool(re.search(r"American Alliance of Museums|\bAAM\b", raw_text))
+
+        entry = {
+            "name": name,
+            "location": location,
+            "website": a_tag["href"],
+            "accredited_through": accredited_through,
+            "also_aam_accredited": also_aam,
+            "section": current_section,
+        }
+
+        # Deduplicate while preserving order
+        if not any(f["name"] == entry["name"] and f["website"] == entry["website"] for f in facilities):
+            facilities.append(entry)
 
     return facilities
 
@@ -140,7 +119,7 @@ def save_csv(facilities: list[dict], path: str = "aza_accredited_facilities.csv"
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(facilities)
-    print(f"Wrote {len(facilities)} rows to {path}")
+    print(f"Successfully wrote {len(facilities)} rows to {path}")
 
 
 if __name__ == "__main__":
