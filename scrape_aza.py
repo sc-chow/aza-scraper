@@ -25,16 +25,35 @@ from bs4 import BeautifulSoup
 
 URL = "https://www.aza.org/find-a-zoo-or-aquarium?locale=en"
 HEADERS = {
-    # A real UA string avoids some basic bot-blocking
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Referer": "https://www.google.com/",
 }
 
 
 def fetch_page(url: str) -> str:
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+    # A plain session (rather than a one-off request) plus a first hit to
+    # the homepage helps pick up any cookies the site sets before it will
+    # serve the actual listing page.
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    session.get("https://www.aza.org/", timeout=30)
+    time.sleep(1)
+    resp = session.get(url, timeout=30)
     resp.raise_for_status()
     return resp.text
 
