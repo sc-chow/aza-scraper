@@ -1,4 +1,6 @@
 import pandas as pd
+import dtale
+import os
 
 # 1. Load the raw data
 df = pd.read_csv('aza_accredited_facilities.csv')
@@ -8,7 +10,7 @@ text_cols = ['name', 'location', 'website', 'accredited_through', 'section']
 df[text_cols] = df[text_cols].apply(lambda col: col.astype(str).str.strip())
 df['name'] = df['name'].str.rstrip(',')
 
-# 3. Comprehensive US State Mapping (Full Names, AP Abbreviations, and 2-Letter Codes)
+# 3. Comprehensive US State Mapping
 us_states = {
     'Alabama': 'AL', 'Ala.': 'AL', 'AL': 'AL',
     'Alaska': 'AK', 'AK': 'AK',
@@ -66,17 +68,30 @@ us_states = {
 # Map US state codes first
 df['state_province'] = df['location'].map(us_states)
 
-# Determine Country: 'USA' if state_province is matched, otherwise fallback to location (e.g., 'Mexico', 'Canada')
+# Determine Country
 df['country'] = df['state_province'].apply(lambda x: 'USA' if pd.notna(x) else None).fillna(df['location'])
 
-# 4. Parse Dates to Standard Datetime (End of Month)
+# 4. Automatically load city mapping from a separate CSV file if it exists
+if os.path.exists('zoo_cities.csv'):
+    city_df = pd.read_csv('zoo_cities.csv')
+    city_df['name'] = city_df['name'].str.strip()
+    city_df['city'] = city_df['city'].str.strip()
+    # Merge the city data based on the zoo name
+    df = df.merge(city_df[['name', 'city']], on='name', how='left')
+    df['city'] = df['city'].fillna("")
+else:
+    df['city'] = ""
+    print("⚠️ Notice: 'zoo_cities.csv' not found. City column initialized as blank.")
+
+# 5. Parse Dates to Standard Datetime (End of Month)
 df['accreditation_expiry_date'] = pd.to_datetime(
     df['accredited_through'], format='%B %Y'
 ) + pd.offsets.MonthEnd(1)
 
-# 5. Reorder and Select Final Clean Columns
+# 6. Reorder and Select Final Clean Columns
 df_clean = df[[
     'name',
+    'city',
     'state_province',
     'country',
     'website',
@@ -85,5 +100,14 @@ df_clean = df[[
     'section',
 ]]
 
-# 6. Export Cleaned Dataset
-df_clean.to_csv('cleaned_zoo_accreditations.csv', index=False)
+# 7. Export Cleaned Dataset
+output_file = 'cleaned_zoo_accreditations.csv'
+df_clean.to_csv(output_file, index=False)
+print(f"Pipeline complete! Saved cleaned data to {output_file}")
+
+# 8. Launch D-Tale viewer
+print("Launching D-Tale interactive viewer...")
+d = dtale.show(df_clean, open_browser=True)
+print("D-Tale URL:", d._url)
+
+input("Press Enter to stop the D-Tale server...")
